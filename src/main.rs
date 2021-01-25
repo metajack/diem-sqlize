@@ -9,7 +9,6 @@ use diem_vm::{
     data_cache::StateViewCache,
 };
 use move_vm_runtime::data_cache::RemoteCache;
-use resource_viewer::MoveValueAnnotator;
 use sqlx::{
     sqlite::SqlitePoolOptions,
     migrate::MigrateDatabase,
@@ -18,9 +17,12 @@ use structopt::StructOpt;
 use url::Url;
 
 use crate::{
+    annotator::MoveValueAnnotator,
+    resolver::Resolver,
     state::{GenesisMemoryCache, GenesisState, SqlState},
 };
 
+mod annotator;
 mod db;
 mod fat_type;
 mod resolver;
@@ -84,7 +86,8 @@ async fn main() -> Result<()> {
 
         if version == 0 {
             println!("tx {}", output.status().status().unwrap());
-            let annotator = MoveValueAnnotator::new_no_stdlib(&*cache);
+            let resolver = Resolver::from_pool(pool.clone());
+            let annotator = MoveValueAnnotator::new(resolver);
             let db = db::DB::from_pool(pool);
 
             for (access_path, write_op) in output.write_set() {
@@ -92,7 +95,8 @@ async fn main() -> Result<()> {
             }
         } else {
             println!("tx {}", output.status().status().unwrap());
-            let annotator = MoveValueAnnotator::new_no_stdlib(&*cache);
+            let resolver = Resolver::from_pool(pool.clone());
+            let annotator = MoveValueAnnotator::new(resolver);
             let db = db::DB::from_pool(pool);
 
             for (access_path, write_op) in output.write_set() {

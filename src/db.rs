@@ -8,9 +8,6 @@ use move_core_types::{
     language_storage::{ModuleId, StructTag, TypeTag},
     value::{MoveStruct, MoveValue},
 };
-use resource_viewer::{
-    AnnotatedMoveStruct, AnnotatedMoveValue, MoveValueAnnotator,
-};
 use sqlx::{
     Row,
     pool::PoolConnection,
@@ -24,7 +21,8 @@ use std::{
 use vm::normalized::{Struct, Type};
 
 use crate::{
-    resolver,
+    annotator::{AnnotatedMoveStruct, AnnotatedMoveValue, MoveValueAnnotator},
+    resolver::Resolver,
     util,
 };
 
@@ -44,7 +42,7 @@ impl DB {
         &self,
         access_path: &AccessPath,
         op: &WriteOp,
-        annotator: &MoveValueAnnotator<'_>,
+        annotator: &MoveValueAnnotator,
     ) {
         let (address, path) = util::decode_access_path(access_path);
         match (&path, op) {
@@ -52,7 +50,7 @@ impl DB {
             (Path::Code(id), WriteOp::Value(v)) => self.publish(id, v).await,
             (Path::Resource(tag), WriteOp::Deletion) => self.delete(&address, tag).await,
             (Path::Resource(tag), WriteOp::Value(v)) => {
-                let resource = annotator.view_resource(tag, v).unwrap();
+                let resource = annotator.view_resource(tag, v).await.unwrap();
                 self.store(&address, tag, resource).await
             },
         }
@@ -380,7 +378,8 @@ pub fn fetch_struct<'a>(
 ) -> Pin<Box<dyn Future<Output=MoveValue> + 'a>> {
     Box::pin(async move {
         // Find the fields to query for the struct
-        let struct_ = resolver::resolve_struct(tag, &mut *db).await.unwrap();
+        let resolver = Resolver::new();
+        let struct_ = resolver.resolve_struct(tag, &mut *db).await.unwrap();
         println!("resolved struct: {:?}", struct_);
 
         let select_sql = format!(

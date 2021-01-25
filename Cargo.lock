@@ -793,7 +793,6 @@ dependencies = [
  "hex",
  "move-core-types",
  "move-vm-runtime",
- "resource-viewer",
  "serde",
  "sqlx",
  "structopt",
@@ -2581,26 +2580,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "web-sys",
  "winreg",
-]
-
-[[package]]
-name = "resource-viewer"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bcs",
- "compiled-stdlib",
- "diem-state-view",
- "diem-types",
- "diem-workspace-hack",
- "hex",
- "move-core-types",
- "move-vm-runtime",
- "move-vm-types",
- "once_cell",
- "serde",
- "serde_json",
- "vm",
 ]
 
 [[package]]

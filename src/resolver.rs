@@ -3,9 +3,7 @@ use diem_types::account_address::AccountAddress;
 use move_core_types::{
     identifier::{Identifier, IdentStr},
     language_storage::{ModuleId, StructTag, TypeTag},
-    value::{MoveStructLayout, MoveTypeLayout},
 };
-use resource_viewer::AnnotatedMoveStruct;
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -15,16 +13,16 @@ use std::{
 };
 use sqlx::{
     Row,
-    pool::PoolConnection,
-    sqlite::{Sqlite, SqlitePool},
+    sqlite::SqlitePool,
 };
 use vm::{
     access::ModuleAccess,
     file_format::{CompiledModule, SignatureToken, StructDefinitionIndex, StructFieldInformation, StructHandleIndex},
-    normalized::{Module, Struct, Type},
 };
 
-use crate::fat_type::{FatStructType, FatType};
+use crate::{
+    fat_type::{FatStructType, FatType},
+};
 
 pub struct Resolver {
     pool: SqlitePool,
@@ -41,11 +39,11 @@ impl Resolver {
     }
 
     pub async fn get_module(&self, address: &AccountAddress, name: &IdentStr) -> Result<Rc<CompiledModule>> {
+        let mut db = self.pool.acquire().await?;
         let module_id = ModuleId::new(address.clone(), name.to_owned());
         if let Some(module) = self.cache.borrow().get(&module_id) {
             Ok(module.clone())
         } else {
-            let mut db = self.pool.acquire().await?;
             let result = sqlx::query("SELECT data FROM __module WHERE address = ? AND name = ?")
                 .bind(address.as_ref())
                 .bind(name.as_str())
@@ -201,82 +199,4 @@ fn find_struct_def_in_module(module: &CompiledModule, name: &IdentStr) -> Result
         }
     }
     Err(anyhow!("struct {} not found in {}", name, module.self_id()))
-}
-
-async fn get_module(
-    address: &AccountAddress,
-    name: &Identifier,
-    db: &mut PoolConnection<Sqlite>,
-) -> Result<Option<CompiledModule>> {
-    let result = sqlx::query("SELECT data FROM __module WHERE address = ? AND name = ?")
-        .bind(address.as_ref())
-        .bind(name.as_str())
-        .fetch_optional(db)
-        .await?;
-    match result {
-        None => Ok(None),
-        Some(row) => {
-            let data: Vec<u8> = row.get(0);
-            let module = CompiledModule::deserialize(&data)
-                .map_err(|e| anyhow!("module {}::{} failed deserialization: {}", address.short_str(), name, e))?;
-            Ok(Some(module))
-        },
-    }
-}
-
-pub async fn resolve_struct(tag: &StructTag, db: &mut PoolConnection<Sqlite>) -> Result<Struct> {
-    let module = get_module(&tag.address, &tag.module, db)
-        .await?
-        .ok_or_else(|| anyhow!("module {}::{} unknown", tag.address.short_str(), tag.module))?;
-    Module::new(&module)
-        .structs
-        .iter()
-        .find(|s| s.name == tag.name)
-        .map(|s| s.clone())
-        .ok_or_else(|| anyhow!("struct {}::{}::{} unknown", tag.address.short_str(), tag.module, tag.name))
-}
-
-pub async fn annotate_blob(
-    tag: &StructTag,
-    blob: &[u8],
-    db: &mut PoolConnection<Sqlite>,
-) -> Result<AnnotatedMoveStruct> {
-    let struct_ = resolve_struct(tag, &mut *db).await?;
-    todo!()
-}
-
-fn type_to_type_layout<'a>(
-    type_: &'a Type,
-    db: &'a mut PoolConnection<Sqlite>
-) -> Pin<Box<dyn Future<Output=Result<MoveTypeLayout>> + 'a>>  {
-    Box::pin(async move {
-        Ok(match type_ {
-            Type::Bool => MoveTypeLayout::Bool,
-            Type::U8 => MoveTypeLayout::U8,
-            Type::U64 => MoveTypeLayout::U64,
-            Type::U128 => MoveTypeLayout::U128,
-            Type::Address => MoveTypeLayout::Address,
-            Type::Signer => MoveTypeLayout::Signer,
-            Type::Vector(t) => MoveTypeLayout::Vector(Box::new(type_to_type_layout(t, &mut *db).await?)),
-            Type::Struct { address, module, name, type_arguments} => {
-                let tag = StructTag {
-                    address: address.clone(),
-                    module: module.clone(),
-                    name: name.clone(),
-                    type_params: type_arguments
-                        .iter()
-                        .cloned()
-                        .map(|t| t.into_type_tag().unwrap())
-                        .collect(),
-                };
-                let struct_ = resolve_struct(&tag, &mut *db).await?;
-                let mut fields = vec![];
-                for f in struct_.fields {
-                    fields.push(type_to_type_layout(&f.type_, &mut *db).await?);
-                }
-                MoveTypeLayout::Struct(MoveStructLayout::new(fields))
-            },
-            _ => return Err(anyhow!("invalid type")),
-        })
-    })
 }
