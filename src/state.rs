@@ -16,6 +16,7 @@ use vm::errors::{VMResult, PartialVMResult};
 
 use crate::{
     db,
+    resolver::Resolver,
     util,
 };
 
@@ -91,7 +92,8 @@ impl StateView for SqlState {
                         None => Ok(None),
                         Some(row) => {
                             println!("FETCHING STRUCT: {:?}", struct_tag);
-                            let struct_ = db::fetch_struct(&struct_tag, row.get(0), &mut db).await;
+                            let resolver = Resolver::from_pool(self.pool.clone());
+                            let struct_ = db::fetch_struct(&struct_tag, row.get(0), &resolver, &mut db).await;
                             println!("FETCHED STRUCT: {:?}", struct_);
                             let bytes = bcs::to_bytes(&struct_).unwrap();
                             Ok(Some(bytes))

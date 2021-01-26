@@ -18,7 +18,6 @@ use std::{
     future::Future,
     pin::Pin,
 };
-use vm::normalized::{Struct, Type};
 
 use crate::{
     annotator::{AnnotatedMoveStruct, AnnotatedMoveValue, MoveValueAnnotator},
@@ -31,7 +30,6 @@ pub struct DB {
 }
 
 impl DB {
-    /// Initialize `DB` with default cache built on `SqlState`
     pub fn from_pool(pool: SqlitePool) -> DB {
         DB {
             pool,
@@ -374,12 +372,12 @@ fn vector_table_name(tag: &StructTag, field_name: &Identifier) -> String {
 pub fn fetch_struct<'a>(
     tag: &'a StructTag,
     id: i64,
+    resolver: &Resolver,
     db: &'a mut PoolConnection<Sqlite>,
 ) -> Pin<Box<dyn Future<Output=MoveValue> + 'a>> {
     Box::pin(async move {
         // Find the fields to query for the struct
-        let resolver = Resolver::new();
-        let struct_ = resolver.resolve_struct(tag, &mut *db).await.unwrap();
+        let struct_ = resolver.resolve_struct(tag).await.unwrap();
         println!("resolved struct: {:?}", struct_);
 
         let select_sql = format!(
@@ -396,7 +394,7 @@ pub fn fetch_struct<'a>(
 
         let mut fields = vec![];
         let mut column_index = 0;
-        for field in &struct_.fields {
+        for field in struct_.fields {
             println!("column_index = {}, field.name = {}, field.type = {:?}", column_index, field.name, field.type_);
             match field.type_ {
                 // these field types cannot appear in storage
@@ -459,7 +457,7 @@ pub fn fetch_struct<'a>(
                         },
                         TypeTag::Struct(ref sub_tag) => {
                             let sub_id: i64 = row.get(column_index);
-                            let value = fetch_struct(&sub_tag, sub_id, &mut *db).await;
+                            let value = fetch_struct(&sub_tag, sub_id, resolver, &mut *db).await;
                             fields.push(value);
                             column_index += 1;
                         },
