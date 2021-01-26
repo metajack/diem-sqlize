@@ -21,6 +21,7 @@ use std::{
 
 use crate::{
     annotator::{AnnotatedMoveStruct, AnnotatedMoveValue, MoveValueAnnotator},
+    fat_type::{FatStructType, FatType},
     resolver::Resolver,
     util,
 };
@@ -34,6 +35,15 @@ impl DB {
         DB {
             pool,
         }
+    }
+
+    pub async fn initialize(&self) {
+        let mut db = self.pool.acquire().await.unwrap();
+
+        let create_sql = format!(
+            "CREATE TABLE __module (address BLOB NOT NULL, name STRING NOT NULL, data BLOB NOT NULL, CONSTRAINT __module_pkey PRIMARY KEY (address, name))",
+        );
+        sqlx::query(&create_sql).execute(&mut db).await.unwrap();
     }
 
     pub async fn execute_with_annotator(
@@ -87,15 +97,6 @@ impl DB {
         let mut db = self.pool.acquire().await.unwrap();
         generate_sql(&address, Some(&data), &mut db).await;
     }
-}
-
-pub async fn initialize(pool: &SqlitePool) {
-    let mut db = pool.acquire().await.unwrap();
-
-    let create_sql = format!(
-        "CREATE TABLE __module (address BLOB NOT NULL, name STRING NOT NULL, data BLOB NOT NULL, CONSTRAINT __module_pkey PRIMARY KEY (address, name))",
-    );
-    sqlx::query(&create_sql).execute(&mut db).await.unwrap();
 }
 
 pub async fn generate_sql(address: &AccountAddress, value: Option<&AnnotatedMoveStruct>, db: &mut PoolConnection<Sqlite>) {
@@ -372,7 +373,7 @@ fn vector_table_name(tag: &StructTag, field_name: &Identifier) -> String {
 pub fn fetch_struct<'a>(
     tag: &'a StructTag,
     id: i64,
-    resolver: &Resolver,
+    resolver: &'a Resolver,
     db: &'a mut PoolConnection<Sqlite>,
 ) -> Pin<Box<dyn Future<Output=MoveValue> + 'a>> {
     Box::pin(async move {
@@ -382,7 +383,7 @@ pub fn fetch_struct<'a>(
 
         let select_sql = format!(
             "SELECT {} FROM {} WHERE __id = {}",
-            struct_columns(tag, &struct_).join(", "),
+            struct_columns(&struct_).join(", "),
             struct_tag_to_sql(tag),
             id,
         );
@@ -394,18 +395,13 @@ pub fn fetch_struct<'a>(
 
         let mut fields = vec![];
         let mut column_index = 0;
-        for field in struct_.fields {
-            println!("column_index = {}, field.name = {}, field.type = {:?}", column_index, field.name, field.type_);
-            match field.type_ {
-                // these field types cannot appear in storage
-                Type::Signer |
-                Type::Reference(_) |
-                Type::MutableReference(_) => unreachable!(),
-
+        for (field_name, field_type) in struct_.fields {
+            println!("column_index = {}, field.name = {}, field.type = {:?}", column_index, field_name, field_type);
+            match field_type {
                 // vectors (other than Vector<u8>) have no corresponding column in the struct's table
-                Type::Vector(ref sub_type) => {
+                FatType::Vector(ref sub_type) => {
                     match **sub_type {
-                        Type::U8 => {
+                        FatType::U8 => {
                             let bytes: Vec<u8> = row.get(column_index);
                             let v: Vec<MoveValue> = bytes.into_iter().map(|b| MoveValue::U8(b)).collect();
                             fields.push(MoveValue::Vector(v));
@@ -413,93 +409,44 @@ pub fn fetch_struct<'a>(
                         },
 
                         _ => {
-                            let v = fetch_vector(tag, id, &field.name, &*sub_type, &mut *db).await;
+                            let v = fetch_vector(tag, &field_name, &*sub_type, id, &mut *db).await;
                             fields.push(MoveValue::Vector(v));
                             // don't change column index
                         },
                     }
                 },
 
-                // type parameters need to check the concrete type
-                Type::TypeParameter(i) => {
-                    match tag.type_params[i as usize] {
-                        // signers can not appear in storage
-                        TypeTag::Signer => unreachable!(),
-
-                        // vectors (other than Vector<u8>) have no corresponding column in the struct's table
-                        TypeTag::Vector(_) => {
-                            todo!("vectors todo");
-                        },
-
-                        // these types all have fields
-                        TypeTag::Bool => {
-                            fields.push(MoveValue::Bool(row.get(column_index)));
-                            column_index += 1;
-                        },
-                        TypeTag::U8 => {
-                            fields.push(MoveValue::U8(row.get::<i64, _>(column_index) as u8));
-                            column_index += 1;
-                        },
-                        TypeTag::U64 => {
-                            fields.push(MoveValue::U64(row.get::<i64, _>(column_index) as u64));
-                            column_index += 1;
-                        },
-                        TypeTag::U128 => {
-                            let bytes: Vec<u8> = row.get(column_index);
-                            let v = u128::from_be_bytes(bytes.try_into().unwrap());
-                            fields.push(MoveValue::U128(v));
-                            column_index += 1;
-                        },
-                        TypeTag::Address => {
-                            let bytes: Vec<u8> = row.get(column_index);
-                            fields.push(MoveValue::Address(AccountAddress::try_from(bytes).unwrap()));
-                            column_index += 1;
-                        },
-                        TypeTag::Struct(ref sub_tag) => {
-                            let sub_id: i64 = row.get(column_index);
-                            let value = fetch_struct(&sub_tag, sub_id, resolver, &mut *db).await;
-                            fields.push(value);
-                            column_index += 1;
-                        },
-                    }
-                },
+                // type parameters can be ignored as they are already expanded
+                FatType::TyParam(_) => {}
 
                 // these types all have fields
-                Type::Bool => {
+                FatType::Bool => {
                     fields.push(MoveValue::Bool(row.get(column_index)));
                     column_index += 1;
                 },
-                Type::U8 => {
+                FatType::U8 => {
                     fields.push(MoveValue::U8(row.get::<i64, _>(column_index) as u8));
                     column_index += 1;
                 },
-                Type::U64 => {
+                FatType::U64 => {
                     fields.push(MoveValue::U64(row.get::<i64, _>(column_index) as u64));
                     column_index += 1;
                 },
-                Type::U128 => {
+                FatType::U128 => {
                     let bytes: Vec<u8> = row.get(column_index);
                     let v = u128::from_be_bytes(bytes.try_into().unwrap());
                     fields.push(MoveValue::U128(v));
                     column_index += 1;
                 },
-                Type::Address => {
+                FatType::Address => {
                     let bytes: Vec<u8> = row.get(column_index);
                     fields.push(MoveValue::Address(AccountAddress::try_from(bytes).unwrap()));
                     column_index += 1;
                 },
-                Type::Struct { ref address, ref module, ref name, ref type_arguments } => {
-                    let sub_tag = StructTag {
-                        address: address.clone(),
-                        module: module.clone(),
-                        name: name.clone(),
-                        type_params: type_arguments
-                            .into_iter()
-                            .map(|t| t.clone().into_type_tag().unwrap())
-                            .collect(),
-                    };
+                FatType::Struct(ref sub_struct) => {
+                    let sub_tag = sub_struct.struct_tag().unwrap();
                     let sub_id = row.get(column_index);
-                    let value = fetch_struct(&sub_tag, sub_id, &mut *db).await;
+                    let value = fetch_struct(&sub_tag, sub_id, resolver, &mut *db).await;
                     fields.push(value);
                     column_index += 1;
                 },
@@ -512,172 +459,84 @@ pub fn fetch_struct<'a>(
 
 /// Return the set of columns in a struct's table. This will be a subset of
 /// columns as Vector fields do not have a column.
-fn struct_columns<'a>(tag: &'a StructTag, struct_: &'a Struct) -> Vec<&'a str> {
-    struct_.fields.iter().filter_map(|field| {
-        match field.type_ {
-            // these field types cannot appear in storage
-            Type::Signer |
-            Type::Reference(_) |
-            Type::MutableReference(_) => unreachable!(),
-
+fn struct_columns<'a>(struct_: &'a FatStructType) -> Vec<&'a str> {
+    struct_.fields.iter().filter_map(|(field_name, field_type)| {
+        match field_type {
             // vectors (other than Vector<u8>) have no corresponding column in the struct's table
-            Type::Vector(ref sub_type) => {
+            FatType::Vector(ref sub_type) => {
                 match **sub_type {
-                    Type::U8 => Some(field.name.as_str()),
+                    FatType::U8 => Some(field_name.as_str()),
                     _ => None,
                 }
             },
 
-            // type parameters need to check the concrete type
-            Type::TypeParameter(i) => {
-                match tag.type_params[i as usize] {
-                    // signers can not appear in storage
-                    TypeTag::Signer => unreachable!(),
-
-                    // vectors (other than Vector<u8>) have no corresponding column in the struct's table
-                    TypeTag::Vector(ref sub_tag) => {
-                        match **sub_tag {
-                            TypeTag::U8 => Some(field.name.as_str()),
-                            _ => None,
-                        }
-                    },
-
-                    // these types all have fields
-                    TypeTag::Bool |
-                    TypeTag::U8 |
-                    TypeTag::U64 |
-                    TypeTag::U128 |
-                    TypeTag::Address |
-                    TypeTag::Struct(_) => Some(field.name.as_str()),
-                }
-            },
+            // type parameters can be ignored as they are expanded already
+            FatType::TyParam(_) => None,
 
             // these types all have fields
-            Type::Bool |
-            Type::U8 |
-            Type::U64 |
-            Type::U128 |
-            Type::Address |
-            Type::Struct { .. } => Some(field.name.as_str()),
+            FatType::Bool |
+            FatType::U8 |
+            FatType::U64 |
+            FatType::U128 |
+            FatType::Address |
+            FatType::Struct(_) => Some(field_name.as_str()),
         }
     }).collect()
 }
 
 fn fetch_vector<'a>(
     tag: &'a StructTag,
-    id: i64,
     field_name: &'a Identifier,
-    elem_type: &'a Type,
+    elem_type: &'a FatType,
+    id: i64,
     db: &'a mut PoolConnection<Sqlite>,
 ) -> Pin<Box<dyn Future<Output=Vec<MoveValue>> + 'a>> {
     Box::pin(async move {
         let table_name = vector_table_name(tag, field_name);
-        let kind = match elem_type {
-            // these field types cannot appears in storage
-            Type::Signer |
-            Type::Reference(_) |
-            Type::MutableReference(_) => unreachable!(),
-
-            // vectors (other than Vector<u8>) have no corresponding column in the elements table
-            Type::Vector(ref sub_type) => {
-                match **sub_type {
-                    Type::Signer |
-                    Type::Reference(_) |
-                    Type::MutableReference(_) => unreachable!(),
-
-                    Type::U8 => ElementKind::Bytes,
-                    _ => ElementKind::Vector(sub_type.clone().into_type_tag().unwrap()), 
-                }
-            },
-
-            // type parameters need to check the concrete type
-            Type::TypeParameter(i) => {
-                match tag.type_params[*i as usize] {
-                    // signers cannot appears in storage
-                    TypeTag::Signer => unreachable!(),
-
-                    // vectors (other than Vector<u8>) have no corresponding column in the elements table
-                    TypeTag::Vector(ref sub_type) => {
-                        match **sub_type {
-                            TypeTag::U8 => ElementKind::Bytes,
-                            _ => ElementKind::Vector((**sub_type).clone()),
-                        }
+        let select_sql = format!(
+            "SELECT slot FROM {} WHERE parent_id = {} ORDER BY rowid",
+            table_name,
+            id,
+        );
+        println!("ELEMENTS QUERY: {}", select_sql);
+        let rows = sqlx::query(&select_sql)
+            .fetch_all(&mut *db)
+            .await
+            .unwrap();
+        rows
+            .into_iter()
+            .map(|row| {
+                match elem_type {
+                    FatType::Bool => MoveValue::Bool(row.get(0)),
+                    FatType::U8 => MoveValue::U8(row.get::<i64,_>(0) as u8),
+                    FatType::U64 => MoveValue::U64(row.get::<i64,_>(0) as u64),
+                    FatType::U128 => {
+                        let bytes: Vec<u8> = row.get(0);
+                        let v = u128::from_be_bytes(bytes.try_into().unwrap());
+                        MoveValue::U128(v)
                     },
-
-                    // these types are all stored inline in the `slot` column
-                    TypeTag::Bool => ElementKind::Bool,
-                    TypeTag::U8 => ElementKind::U8,
-                    TypeTag::U64 => ElementKind::U64,
-                    TypeTag::U128 => ElementKind::U128,
-                    TypeTag::Address => ElementKind::Address,
-                    TypeTag::Struct(_) => ElementKind::Struct,
-                }
-            },
-
-            // these types are all stored inline in the `slot` column
-            Type::Bool => ElementKind::Bool,
-            Type::U8 => ElementKind::U8,
-            Type::U64 => ElementKind::U64,
-            Type::U128 => ElementKind::U128,
-            Type::Address => ElementKind::Address,
-            Type::Struct { .. } => ElementKind::Struct,
-        };
-
-        match kind {
-            ElementKind::Vector(_) => todo!(),
-            kind => {
-                let select_sql = format!(
-                    "SELECT slot FROM {} WHERE parent_id = {} ORDER BY rowid",
-                    table_name,
-                    id,
-                );
-                println!("ELEMENTS QUERY: {}", select_sql);
-                let rows = sqlx::query(&select_sql)
-                    .fetch_all(&mut *db)
-                    .await
-                    .unwrap();
-                rows
-                    .into_iter()
-                    .map(|row| {
-                        match kind {
-                            ElementKind::Bool => MoveValue::Bool(row.get(0)),
-                            ElementKind::U8 => MoveValue::U8(row.get::<i64,_>(0) as u8),
-                            ElementKind::U64 => MoveValue::U64(row.get::<i64,_>(0) as u64),
-                            ElementKind::U128 => {
-                                let bytes: Vec<u8> = row.get(0);
-                                let v = u128::from_be_bytes(bytes.try_into().unwrap());
-                                MoveValue::U128(v)
-                            },
-                            ElementKind::Address => {
-                                let bytes: Vec<u8> = row.get(0);
-                                MoveValue::Address(AccountAddress::try_from(bytes).unwrap())
-                            },
-                            ElementKind::Bytes => {
+                    FatType::Address => {
+                        let bytes: Vec<u8> = row.get(0);
+                        MoveValue::Address(AccountAddress::try_from(bytes).unwrap())
+                    },
+                    FatType::Vector(ref sub_type) => {
+                        match **sub_type {
+                            FatType::U8 => {
                                 let bytes: Vec<u8> = row.get(0);
                                 let v: Vec<MoveValue> = bytes
                                     .into_iter()
                                     .map(|b| MoveValue::U8(b)).collect();
                                 MoveValue::Vector(v)
                             },
-                            ElementKind::Struct => {
-                                todo!()
-                            },
-                            ElementKind::Vector(_) => unreachable!(),
+                            _ => todo!(),
                         }
-                    })
-                    .collect()
-            },
-        }
+                    },
+                    FatType::Struct(_) => {
+                        todo!()
+                    },
+                    FatType::TyParam(_) => unreachable!(),
+                }
+            })
+            .collect()
     })
-}
-
-enum ElementKind {
-    Bool,
-    U8,
-    U64,
-    U128,
-    Address,
-    Struct,
-    Bytes,
-    Vector(TypeTag),
 }

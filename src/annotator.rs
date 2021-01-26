@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Result};
 use diem_types::{
-    access_path::AccessPath,
     account_address::AccountAddress,
     contract_event::ContractEvent,
 };
@@ -58,17 +57,6 @@ impl MoveValueAnnotator {
         }
     }
 
-    pub async fn view_access_path(
-        &self,
-        access_path: AccessPath,
-        blob: &[u8],
-    ) -> Result<AnnotatedMoveStruct> {
-        match access_path.get_struct_tag() {
-            Some(tag) => self.view_resource(&tag, blob).await,
-            None => Err(anyhow!("Bad resource access path")),
-        }
-    }
-
     pub async fn view_resource(&self, tag: &StructTag, blob: &[u8]) -> Result<AnnotatedMoveStruct> {
         let ty = self.resolver.resolve_struct(tag).await?;
         let struct_def = (&ty)
@@ -78,6 +66,7 @@ impl MoveValueAnnotator {
         self.annotate_struct(&move_struct, &ty).await
     }
 
+    #[allow(dead_code)]
     pub async fn view_contract_event(&self, event: &ContractEvent) -> Result<AnnotatedMoveValue> {
         let ty = self.resolver.resolve_type(event.type_tag()).await?;
         let move_ty = (&ty)
@@ -96,18 +85,14 @@ impl MoveValueAnnotator {
         let struct_tag = ty
             .struct_tag()
             .map_err(|e| e.finish(Location::Undefined).into_vm_status())?;
-        let field_names = self.resolver.get_field_names(ty).await?;
         let mut annotated_fields = vec![];
-        for (ty, v) in ty.layout.iter().zip(move_struct.fields().iter()) {
-            annotated_fields.push(self.annotate_value(v, ty).await?);
+        for ((id, ty), v) in ty.fields.iter().zip(move_struct.fields().iter()) {
+            annotated_fields.push((id.clone(), self.annotate_value(v, ty).await?));
         }
         Ok(AnnotatedMoveStruct {
             is_resource: ty.is_resource,
             type_: struct_tag,
-            value: field_names
-                .into_iter()
-                .zip(annotated_fields.into_iter())
-                .collect(),
+            value: annotated_fields,
         })
     }
 

@@ -792,7 +792,6 @@ dependencies = [
  "diem-vm",
  "hex",
  "move-core-types",
- "move-vm-runtime",
  "serde",
  "sqlx",
  "structopt",

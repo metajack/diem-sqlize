@@ -1,7 +1,11 @@
 use anyhow::{anyhow, Result};
-use diem_types::account_address::AccountAddress;
+use diem_types::{
+    access_path::Path,
+    account_address::AccountAddress,
+    write_set::{WriteOp, WriteSet},
+};
 use move_core_types::{
-    identifier::{Identifier, IdentStr},
+    identifier::IdentStr,
     language_storage::{ModuleId, StructTag, TypeTag},
 };
 use std::{
@@ -38,11 +42,35 @@ impl Resolver {
         }
     }
 
+    /// Pre-fill the internal cache with the modules published in the write
+    /// set. This should only be needed when resolving the genesis
+    /// transaction.
+    pub fn from_pool_and_genesis_write_set(pool: SqlitePool, write_set: &WriteSet) -> Self {
+        let mut map = HashMap::new();
+        for (access_path, write_op) in write_set {
+            let path: Path = bcs::from_bytes(&access_path.path).unwrap();
+            match (&path, write_op) {
+                (Path::Code(module_id), WriteOp::Value(value)) => {
+                    let module = CompiledModule::deserialize(value).unwrap();
+                    map.insert(module_id.clone(), Rc::new(module));
+                },
+                _ => {},
+            }
+        }
+
+        let cache = RefCell::new(map);
+        Resolver {
+            pool,
+            cache,
+        }
+    }
+
     pub async fn get_module(&self, address: &AccountAddress, name: &IdentStr) -> Result<Rc<CompiledModule>> {
         let mut db = self.pool.acquire().await?;
         let module_id = ModuleId::new(address.clone(), name.to_owned());
-        if let Some(module) = self.cache.borrow().get(&module_id) {
-            Ok(module.clone())
+        let cached = self.cache.borrow().get(&module_id).cloned();
+        if let Some(module) = cached {
+            Ok(module)
         } else {
             let result = sqlx::query("SELECT data FROM __module WHERE address = ? AND name = ?")
                 .bind(address.as_ref())
@@ -67,7 +95,7 @@ impl Resolver {
         Box::pin(async move {
             Ok(match type_tag {
                 TypeTag::Address => FatType::Address,
-                TypeTag::Signer => FatType::Signer,
+                TypeTag::Signer => return Err(anyhow!("cannot resolve Signer types")),
                 TypeTag::Bool => FatType::Bool,
                 TypeTag::Struct(struct_) => FatType::Struct(Box::new(self.resolve_struct(struct_).await?)),
                 TypeTag::U8 => FatType::U8,
@@ -91,21 +119,6 @@ impl Resolver {
         })
     }
 
-    pub async fn get_field_names(&self, ty: &FatStructType) -> Result<Vec<Identifier>> {
-        let module = self.get_module(&ty.address, ty.module.as_ident_str()).await?;
-        let struct_def_idx = find_struct_def_in_module(&module, ty.name.as_ident_str())?;
-        let struct_def = module.struct_def_at(struct_def_idx);
-        match &struct_def.field_information {
-            StructFieldInformation::Native => Err(anyhow!("unexpected native struct")),
-            StructFieldInformation::Declared(defs) => Ok(
-                defs
-                    .iter()
-                    .map(|field_def| module.identifier_at(field_def.name).to_owned())
-                    .collect()
-            ),
-        }
-    }
-
     fn resolve_signature<'a>(
         &'a self,
         module: &'a CompiledModule,
@@ -113,12 +126,14 @@ impl Resolver {
     ) -> Pin<Box<dyn Future<Output=Result<FatType>> + 'a>> {
         Box::pin(async move {
             Ok(match sig {
+                SignatureToken::Reference(_) |
+                SignatureToken::MutableReference(_) => return Err(anyhow!("unexpected reference type")),
                 SignatureToken::Bool => FatType::Bool,
                 SignatureToken::U8 => FatType::U8,
                 SignatureToken::U64 => FatType::U64,
                 SignatureToken::U128 => FatType::U128,
                 SignatureToken::Address => FatType::Address,
-                SignatureToken::Signer => FatType::Signer,
+                SignatureToken::Signer => return Err(anyhow!("unexpected Signer type")),
                 SignatureToken::Vector(ty) => {
                     FatType::Vector(Box::new(self.resolve_signature(module, ty).await?))
                 }
@@ -138,9 +153,6 @@ impl Resolver {
                     ))
                 }
                 SignatureToken::TypeParameter(idx) => FatType::TyParam(*idx as usize),
-                SignatureToken::MutableReference(_) | SignatureToken::Reference(_) => {
-                    return Err(anyhow!("unexpected reference"))
-                }
             })
         })
     }
@@ -174,9 +186,11 @@ impl Resolver {
         match &struct_def.field_information {
             StructFieldInformation::Native => Err(anyhow!("unexpected native struct")),
             StructFieldInformation::Declared(defs) => {
-                let mut layout = vec![];
+                let mut fields = vec![];
                 for field_def in defs {
-                    layout.push(self.resolve_signature(module, &field_def.signature.0).await?);
+                    let name = module.identifier_at(field_def.name).to_owned();
+                    let type_ = self.resolve_signature(module, &field_def.signature.0).await?;
+                    fields.push((name, type_));
                 }
                 Ok(FatStructType {
                     address,
@@ -184,7 +198,7 @@ impl Resolver {
                     name,
                     is_resource,
                     ty_args,
-                    layout,
+                    fields,
                 })
             },
         }

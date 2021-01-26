@@ -1,14 +1,11 @@
 use anyhow::{anyhow, Result};
 use diem_json_rpc_client::async_client::{Client, Retry};
-use diem_state_view::StateView;
 use diem_types::{
     transaction::Transaction,
 };
 use diem_vm::{
     DiemVM, VMExecutor,
-    data_cache::StateViewCache,
 };
-use move_vm_runtime::data_cache::RemoteCache;
 use sqlx::{
     sqlite::SqlitePoolOptions,
     migrate::MigrateDatabase,
@@ -18,8 +15,9 @@ use url::Url;
 
 use crate::{
     annotator::MoveValueAnnotator,
+    db::DB,
     resolver::Resolver,
-    state::{GenesisMemoryCache, GenesisState, SqlState},
+    state::{GenesisState, SqlState},
 };
 
 mod annotator;
@@ -51,7 +49,8 @@ async fn main() -> Result<()> {
 
     let pool = SqlitePoolOptions::new()
         .connect("sqlite:chain.db").await?;
-    db::initialize(&pool).await;
+    let db = DB::from_pool(pool.clone());
+    db.initialize().await;
 
     for version in 0..latest_version {
         println!("tx {}", version);
@@ -75,20 +74,10 @@ async fn main() -> Result<()> {
             }
         }).await?;
 
-        let state_view = SqlState::from_pool(pool.clone());
-        let cache = if version == 0 {
-            let cache = GenesisMemoryCache::from_write_set(output.write_set());
-            Box::new(cache) as Box<dyn RemoteCache>
-        } else {
-            let cache = StateViewCache::new(&state_view as &dyn StateView);
-            Box::new(cache) as Box<dyn RemoteCache>
-        };
-
         if version == 0 {
             println!("tx {}", output.status().status().unwrap());
-            let resolver = Resolver::from_pool(pool.clone());
+            let resolver = Resolver::from_pool_and_genesis_write_set(pool.clone(), output.write_set());
             let annotator = MoveValueAnnotator::new(resolver);
-            let db = db::DB::from_pool(pool);
 
             for (access_path, write_op) in output.write_set() {
                 db.execute_with_annotator(access_path, write_op, &annotator).await;
@@ -96,12 +85,11 @@ async fn main() -> Result<()> {
         } else {
             println!("tx {}", output.status().status().unwrap());
             let resolver = Resolver::from_pool(pool.clone());
-            let annotator = MoveValueAnnotator::new(resolver);
-            let db = db::DB::from_pool(pool);
+            let _annotator = MoveValueAnnotator::new(resolver);
 
-            for (access_path, write_op) in output.write_set() {
-                db.execute_with_annotator(access_path, write_op, &annotator).await;
+            for (_access_path, _write_op) in output.write_set() {
                 todo!();
+                //db.execute_with_annotator(access_path, write_op, &annotator).await;
             }
         }
     }

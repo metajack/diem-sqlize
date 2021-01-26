@@ -21,7 +21,7 @@ pub struct FatStructType {
     pub name: Identifier,
     pub is_resource: bool,
     pub ty_args: Vec<FatType>,
-    pub layout: Vec<FatType>,
+    pub fields: Vec<(Identifier, FatType)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,11 +31,8 @@ pub enum FatType {
     U64,
     U128,
     Address,
-    Signer,
     Vector(Box<FatType>),
     Struct(Box<FatStructType>),
-    Reference(Box<FatType>),
-    MutableReference(Box<FatType>),
     TyParam(usize),
 }
 
@@ -51,10 +48,15 @@ impl FatStructType {
                 .iter()
                 .map(|ty| ty.subst(ty_args))
                 .collect::<PartialVMResult<_>>()?,
-            layout: self
-                .layout
+            fields: self
+                .fields
                 .iter()
-                .map(|ty| ty.subst(ty_args))
+                .map(|(id, ty)| {
+                    match ty.subst(ty_args) {
+                        Ok(t) => Ok((id.clone(), t)),
+                        Err(e) => Err(e),
+                    }
+                })
                 .collect::<PartialVMResult<_>>()?,
         })
     }
@@ -98,11 +100,7 @@ impl FatType {
             U64 => U64,
             U128 => U128,
             Address => Address,
-            Signer => Signer,
             Vector(ty) => Vector(Box::new(ty.subst(ty_args)?)),
-            Reference(ty) => Reference(Box::new(ty.subst(ty_args)?)),
-            MutableReference(ty) => MutableReference(Box::new(ty.subst(ty_args)?)),
-
             Struct(struct_ty) => Struct(Box::new(struct_ty.subst(ty_args)?)),
         };
 
@@ -118,11 +116,9 @@ impl FatType {
             U64 => TypeTag::U64,
             U128 => TypeTag::U128,
             Address => TypeTag::Address,
-            Signer => TypeTag::Signer,
             Vector(ty) => TypeTag::Vector(Box::new(ty.type_tag()?)),
             Struct(struct_ty) => TypeTag::Struct(struct_ty.struct_tag()?),
-
-            Reference(_) | MutableReference(_) | TyParam(_) => {
+            TyParam(_) => {
                 return Err(
                     PartialVMError::new(StatusCode::UNKNOWN_INVARIANT_VIOLATION_ERROR)
                         .with_message(format!("cannot derive type tag for {:?}", self)),
@@ -139,9 +135,9 @@ impl TryInto<MoveStructLayout> for &FatStructType {
 
     fn try_into(self) -> Result<MoveStructLayout, Self::Error> {
         Ok(MoveStructLayout::new(
-            self.layout
+            self.fields
                 .iter()
-                .map(|ty| ty.try_into())
+                .map(|(_, ty)| ty.try_into())
                 .collect::<PartialVMResult<Vec<_>>>()?,
         ))
     }
@@ -159,13 +155,11 @@ impl TryInto<MoveTypeLayout> for &FatType {
             FatType::Bool => MoveTypeLayout::Bool,
             FatType::Vector(v) => MoveTypeLayout::Vector(Box::new(v.as_ref().try_into()?)),
             FatType::Struct(s) => MoveTypeLayout::Struct(MoveStructLayout::new(
-                s.layout
+                s.fields
                     .iter()
-                    .map(|ty| ty.try_into())
+                    .map(|(_, ty)| ty.try_into())
                     .collect::<PartialVMResult<Vec<_>>>()?,
             )),
-            FatType::Signer => MoveTypeLayout::Signer,
-
             _ => return Err(PartialVMError::new(StatusCode::ABORT_TYPE_MISMATCH_ERROR)),
         })
     }

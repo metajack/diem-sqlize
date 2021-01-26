@@ -19,7 +19,7 @@ diem-state-view = { version = "0.1.0", git = "https://github.com/diem/diem", rev
 diem-types = { version = "0.1.0", git = "https://github.com/diem/diem", rev = "453eae5c4a660c53ad34242f45296119485ecb5c" }
 diem-vm = { version = "0.1.0", git = "https://github.com/diem/diem", rev = "453eae5c4a660c53ad34242f45296119485ecb5c" }
 move-core-types = { version = "0.1.0", git = "https://github.com/diem/diem", rev = "453eae5c4a660c53ad34242f45296119485ecb5c" }
-move-vm-runtime = { version = "0.1.0", git = "https://github.com/diem/diem", rev = "453eae5c4a660c53ad34242f45296119485ecb5c" }
+#move-vm-runtime = { version = "0.1.0", git = "https://github.com/diem/diem", rev = "453eae5c4a660c53ad34242f45296119485ecb5c" }
 vm = { version = "0.1.0", git = "https://github.com/diem/diem", rev = "453eae5c4a660c53ad34242f45296119485ecb5c" }
 
 [patch."http://github.com/diem/diem"]
@@ -28,7 +28,7 @@ diem-state-view = { path = "../diem/storage/state-view" }
 diem-types = { path = "../diem/types" }
 diem-vm = { path = "../diem/language/diem-vm" }
 move-core-types = { path = "../diem/language/move-core/types" }
-move-vm-runtime = { path = "../diem/language/move-vm/runtime" }
+#move-vm-runtime = { path = "../diem/language/move-vm/runtime" }
 vm = { path = "../diem/language/vm" }
 
 [patch.crates-io]

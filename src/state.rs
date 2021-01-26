@@ -2,17 +2,9 @@ use anyhow::{anyhow, Result};
 use diem_state_view::StateView;
 use diem_types::{
     access_path::{AccessPath, Path},
-    write_set::{WriteOp, WriteSet},
 };
-use move_core_types::{
-    account_address::AccountAddress,
-    language_storage::{ModuleId, StructTag},
-};
-use move_vm_runtime::data_cache::RemoteCache;
 use sqlx::{Row, sqlite::SqlitePool};
-use std::collections::HashMap;
 use tokio::runtime;
-use vm::errors::{VMResult, PartialVMResult};
 
 use crate::{
     db,
@@ -57,7 +49,10 @@ impl StateView for SqlState {
     fn get(&self, access_path: &AccessPath) -> Result<Option<Vec<u8>>> {
         let (address, path) = util::decode_access_path(access_path);
         println!("StateView::get({})", access_path);
-        let rt = runtime::Builder::new_current_thread().build().unwrap();
+        let rt = runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(async {
             let mut db = self.pool.acquire().await?;
             match path {
@@ -111,48 +106,5 @@ impl StateView for SqlState {
 
     fn is_genesis(&self) -> bool {
         false
-    }
-}
-
-pub struct GenesisMemoryCache {
-    modules: HashMap<ModuleId, Vec<u8>>,
-}
-
-impl GenesisMemoryCache {
-    pub fn from_write_set(write_set: &WriteSet) -> GenesisMemoryCache {
-        let mut modules = HashMap::new();
-
-        for (access_path, write_op) in write_set.iter().filter(|(_, op)| !op.is_deletion()) {
-            let value = match write_op {
-                WriteOp::Value(value) => value.clone(),
-                _ => unreachable!(),
-            };
-
-            let path: Path = bcs::from_bytes(&access_path.path).unwrap();
-            match path {
-                Path::Code(module_id) => {
-                    modules.insert(module_id, value);
-                },
-                Path::Resource(_) => {},
-            }
-        }
-
-        GenesisMemoryCache {
-            modules,
-        }
-    }
-}
-
-impl RemoteCache for GenesisMemoryCache {
-    fn get_module(&self, module_id: &ModuleId) -> VMResult<Option<Vec<u8>>> {
-        if let Some(v) = self.modules.get(module_id) {
-            Ok(Some(v.clone()))
-        } else {
-            Ok(None)
-        }
-    }
-
-    fn get_resource(&self, _address: &AccountAddress, _tag: &StructTag) -> PartialVMResult<Option<Vec<u8>>> {
-        Ok(None)
     }
 }
