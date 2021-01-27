@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
     }
 
     // Replay the rest of the chain in chunks
-    for versions in &(1..latest_version).chunks(50) {
+    for versions in &(1..latest_version).chunks(100) {
         let versions = versions.collect::<Vec<_>>();
         let first_version = versions[0];
         println!("txs from {}", first_version);
@@ -95,18 +95,19 @@ async fn main() -> Result<()> {
         // must make async calls so we use `spawn_blocking` to let tokio know.
         let pool = pool.clone();
         let pool2 = pool.clone();
-        let output = tokio::task::spawn_blocking(move || {
+        let outputs = tokio::task::spawn_blocking(move || {
             let state_view = SqlState::from_pool(pool2);
-            let mut outputs = DiemVM::execute_block(txs, &state_view).unwrap();
-            outputs.remove(0)
+            DiemVM::execute_block(txs, &state_view).unwrap()
         }).await?;
 
-        println!("tx {}", output.status().status().unwrap());
-        let resolver = Resolver::from_pool(pool.clone());
-        let annotator = MoveValueAnnotator::new(resolver);
+        for output in outputs {
+            println!("tx {}", output.status().status().unwrap());
+            let resolver = Resolver::from_pool(pool.clone());
+            let annotator = MoveValueAnnotator::new(resolver);
 
-        for (access_path, write_op) in output.write_set() {
-            db.execute_with_annotator(access_path, write_op, &annotator).await;
+            for (access_path, write_op) in output.write_set() {
+                db.execute_with_annotator(access_path, write_op, &annotator).await;
+            }
         }
     }
 
