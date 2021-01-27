@@ -6,6 +6,7 @@ use diem_types::{
 use diem_vm::{
     DiemVM, VMExecutor,
 };
+use itertools::Itertools;
 use sqlx::{
     sqlite::SqlitePoolOptions,
     migrate::MigrateDatabase,
@@ -52,61 +53,62 @@ async fn main() -> Result<()> {
     let db = DB::from_pool(pool.clone());
     db.initialize().await;
 
-    for version in 0..latest_version {
-        println!("tx {}", version);
-        let txs = client.get_transactions(version, 1, false).await?;
+    println!("current version is {}", latest_version);
+
+    // Replay genesis (version 0)
+    {
+        println!("tx 0");
+        let txs = client.get_transactions(0, 1, false).await?;
         let bytes = hex::decode(&txs[0].bytes).unwrap();
         let tx: Transaction = bcs::from_bytes(&bytes).unwrap();
+        // VM is not async, but will call the `StateView` implementation which
+        // must make async calls so we use `spawn_blocking` to let tokio know.
+        let output  = tokio::task::spawn_blocking(move || {
+            let state_view = GenesisState;
+            let mut outputs = DiemVM::execute_block(vec![tx], &state_view).unwrap();
+            outputs.remove(0)
+        }).await?;
+        println!("tx {}", output.status().status().unwrap());
+        let resolver = Resolver::from_pool_and_genesis_write_set(pool.clone(), output.write_set());
+        let annotator = MoveValueAnnotator::new(resolver);
+
+        for (access_path, write_op) in output.write_set() {
+            db.execute_with_annotator(access_path, write_op, &annotator).await;
+        }
+    }
+
+    // Replay the rest of the chain in chunks
+    for versions in &(1..latest_version).chunks(50) {
+        let versions = versions.collect::<Vec<_>>();
+        let first_version = versions[0];
+        println!("txs from {}", first_version);
+        let txs = client.get_transactions(first_version, versions.len() as u64, false)
+            .await?
+            .iter()
+            .map(|t| {
+                let bytes = hex::decode(&t.bytes).unwrap();
+                bcs::from_bytes::<Transaction>(&bytes).unwrap()
+            })
+            .collect::<Vec<_>>();
 
         // VM is not async, but will call the `StateView` implementation which
         // must make async calls so we use `spawn_blocking` to let tokio know.
         let pool = pool.clone();
         let pool2 = pool.clone();
         let output = tokio::task::spawn_blocking(move || {
-            if version == 0 {
-                let state_view = GenesisState;
-                let mut outputs = DiemVM::execute_block(vec![tx], &state_view).unwrap();
-                outputs.remove(0)
-            } else {
-                let state_view = SqlState::from_pool(pool2);
-                let mut outputs = DiemVM::execute_block(vec![tx], &state_view).unwrap();
-                outputs.remove(0)
-            }
+            let state_view = SqlState::from_pool(pool2);
+            let mut outputs = DiemVM::execute_block(txs, &state_view).unwrap();
+            outputs.remove(0)
         }).await?;
 
-        if version == 0 {
-            println!("tx {}", output.status().status().unwrap());
-            let resolver = Resolver::from_pool_and_genesis_write_set(pool.clone(), output.write_set());
-            let annotator = MoveValueAnnotator::new(resolver);
+        println!("tx {}", output.status().status().unwrap());
+        let resolver = Resolver::from_pool(pool.clone());
+        let annotator = MoveValueAnnotator::new(resolver);
 
-            for (access_path, write_op) in output.write_set() {
-                db.execute_with_annotator(access_path, write_op, &annotator).await;
-            }
-        } else {
-            println!("tx {}", output.status().status().unwrap());
-            let resolver = Resolver::from_pool(pool.clone());
-            let _annotator = MoveValueAnnotator::new(resolver);
-
-            for (_access_path, _write_op) in output.write_set() {
-                todo!();
-                //db.execute_with_annotator(access_path, write_op, &annotator).await;
-            }
+        for (access_path, write_op) in output.write_set() {
+            db.execute_with_annotator(access_path, write_op, &annotator).await;
         }
     }
-
-    // rough plan:
-    // 1. get sqlite going
-    // 2. make a stateview impl for sqlite
-    // 3. spin up a DiemVM
-    // 4. pass in txns one at a time
-    // 5. convert writeset into sql
-    //    a. decode AccessPath to Path
-    //    b. decode blob into AnnotatedMoveStruct (or similar)
-    //       - will need to make a temp RemoteCache for genesis
-    //    c. fetch old blob (may want to keep a binary cache of bcs data by accesspath)
-    //    d. decode old blob into AnnotatedMoveStruct
-    //    e. produce PrimitiveWriteSet for the blob
-    //    f. generate SQL from primitive write set
 
     Ok(())
 }

@@ -95,8 +95,134 @@ impl DB {
         println!("storing {}::{}", address, tag);
         println!("{}", data);
         let mut db = self.pool.acquire().await.unwrap();
-        generate_sql(&address, Some(&data), &mut db).await;
+
+        // see if global object already exists
+        let sql_tag = struct_tag_to_sql(tag);
+        let select_sql = format!(
+            "SELECT id FROM __root__{} WHERE address = ?",
+            sql_tag,
+        );
+        println!("QUERY: {}\nPARAM: {}", select_sql, address.short_str());
+        let result = sqlx::query(&select_sql)
+            .bind(address.as_ref())
+            .fetch_optional(&mut db)
+            .await
+            .unwrap_or(None);
+        match result {
+            None => {
+                generate_sql(&address, Some(&data), &mut db).await;
+            },
+            Some(row) => {
+                let id = row.get(0);
+                let resolver = Resolver::from_pool(self.pool.clone());
+                let old_struct = match fetch_struct(tag, id, &resolver, &mut db).await.unwrap() {
+                    MoveValue::Struct(s) => s,
+                    _ => unreachable!(),
+                };
+                let fat_type = resolver.resolve_struct(tag).await.unwrap();
+                let annotator = MoveValueAnnotator::new(resolver);
+                let old_struct = annotator.annotate_struct(&old_struct, &fat_type).await.unwrap();
+                generate_diff_sql(&old_struct, &data, id, &mut db).await;
+            },
+        }
     }
+}
+
+pub fn generate_diff_sql<'a>(
+    old_value: &'a  AnnotatedMoveStruct,
+    value: &'a AnnotatedMoveStruct,
+    id: i64,
+    db: &'a mut PoolConnection<Sqlite>
+) -> Pin<Box<dyn Future<Output=()> + 'a>>
+{
+    Box::pin(async move {
+        assert_eq!(old_value.type_, value.type_, "struct types must match");
+
+        println!("generating diff sql");
+        println!("old value =\n{:?}", old_value);
+        println!("new value =\n{:?}", value);
+        let changed_fields = old_value
+            .value
+            .iter()
+            .zip(value.value.iter())
+            .filter_map(|((name, ov), (_, nv))| {
+                if ov == nv {
+                    None
+                } else {
+                    Some((name, ov, nv))
+                }
+            })
+            .collect::<Vec<_>>();
+        if changed_fields.is_empty() {
+            return;
+        }
+
+        println!("changed fields: {}",changed_fields.iter().map(|(s, _, _)| format!("{}", s)).collect::<Vec<_>>().join(", "));
+
+        let sql_tag = struct_tag_to_sql(&value.type_);
+        let mut updated = vec![];
+        for (field_name, old_field_value, field_value) in changed_fields {
+            match field_value {
+                AnnotatedMoveValue::U8(v) => {
+                    updated.push(format!("{} = {}", field_name, v));
+                },
+                AnnotatedMoveValue::U64(v) => {
+                    updated.push(format!("{} = {}", field_name, v));
+                },
+                AnnotatedMoveValue::U128(v) => {
+                    updated.push(format!("{} = x'{}'", field_name, hex::encode(v.to_be_bytes())));
+                },
+                AnnotatedMoveValue::Bool(v) => {
+                    updated.push(format!("{} = {}", field_name, v));
+                },
+                AnnotatedMoveValue::Address(v) => {
+                    updated.push(format!("{} = x'{}'", field_name, hex::encode(v)));
+                },
+                AnnotatedMoveValue::Bytes(v) => {
+                    updated.push(format!("{} = x'{}'", field_name, hex::encode(v)));
+                },
+                AnnotatedMoveValue::Vector(_, _) => {
+                    todo!();
+                },
+                AnnotatedMoveValue::Struct(v) => {
+                    // this will generate no changes here, but will recursively update the struct
+                    let ov = match old_field_value {
+                        AnnotatedMoveValue::Struct(o) => o,
+                        _ => unreachable!(),
+                    };
+
+                    let select_sql = format!(
+                        "SELECT {} FROM {} WHERE __id = ?",
+                        field_name,
+                        sql_tag,
+                    );
+                    println!("fetching id for changed sub-struct: {}", select_sql);
+                    let sub_id = sqlx::query(&select_sql)
+                        .bind(id)
+                        .fetch_one(&mut *db)
+                        .await
+                        .unwrap()
+                        .get(0);
+                    
+                    generate_diff_sql(&ov, &v, sub_id, &mut *db).await;
+                },
+            }
+        }
+
+        if !updated.is_empty() {
+            let update_sql = format!(
+                "UPDATE {} SET {} WHERE __id = ?",
+                sql_tag,
+                updated.join(", "),
+            );
+            println!("{}", update_sql);
+            sqlx::query(&update_sql)
+                .bind(id)
+                .execute(&mut *db)
+                .await
+                .unwrap();
+        }
+    })
 }
 
 pub async fn generate_sql(address: &AccountAddress, value: Option<&AnnotatedMoveStruct>, db: &mut PoolConnection<Sqlite>) {
@@ -375,23 +501,33 @@ pub fn fetch_struct<'a>(
     id: i64,
     resolver: &'a Resolver,
     db: &'a mut PoolConnection<Sqlite>,
-) -> Pin<Box<dyn Future<Output=MoveValue> + 'a>> {
+) -> Pin<Box<dyn Future<Output=Option<MoveValue>> + 'a>> {
     Box::pin(async move {
         // Find the fields to query for the struct
         let struct_ = resolver.resolve_struct(tag).await.unwrap();
         println!("resolved struct: {:?}", struct_);
 
+        let columns = struct_columns(&struct_);
+        let columns = if columns.is_empty() {
+            vec!["__id"]
+        } else {
+            columns
+        };
         let select_sql = format!(
             "SELECT {} FROM {} WHERE __id = {}",
-            struct_columns(&struct_).join(", "),
+            columns.join(", "),
             struct_tag_to_sql(tag),
             id,
         );
         println!("{}", select_sql);
         let row = sqlx::query(&select_sql)
-            .fetch_one(&mut *db)
+            .fetch_optional(&mut *db)
             .await
             .unwrap();
+        let row = match row {
+            None => return None,
+            Some(r) => r,
+        };
 
         let mut fields = vec![];
         let mut column_index = 0;
@@ -409,7 +545,7 @@ pub fn fetch_struct<'a>(
                         },
 
                         _ => {
-                            let v = fetch_vector(tag, &field_name, &*sub_type, id, &mut *db).await;
+                            let v = fetch_vector(tag, &field_name, &*sub_type, id, resolver, db).await;
                             fields.push(MoveValue::Vector(v));
                             // don't change column index
                         },
@@ -446,14 +582,14 @@ pub fn fetch_struct<'a>(
                 FatType::Struct(ref sub_struct) => {
                     let sub_tag = sub_struct.struct_tag().unwrap();
                     let sub_id = row.get(column_index);
-                    let value = fetch_struct(&sub_tag, sub_id, resolver, &mut *db).await;
+                    let value = fetch_struct(&sub_tag, sub_id, resolver, &mut *db).await.unwrap();
                     fields.push(value);
                     column_index += 1;
                 },
             }
         }
 
-        MoveValue::Struct(MoveStruct::new(fields))
+        Some(MoveValue::Struct(MoveStruct::new(fields)))
     })
 }
 
@@ -489,6 +625,7 @@ fn fetch_vector<'a>(
     field_name: &'a Identifier,
     elem_type: &'a FatType,
     id: i64,
+    resolver: &'a Resolver,
     db: &'a mut PoolConnection<Sqlite>,
 ) -> Pin<Box<dyn Future<Output=Vec<MoveValue>> + 'a>> {
     Box::pin(async move {
@@ -503,40 +640,42 @@ fn fetch_vector<'a>(
             .fetch_all(&mut *db)
             .await
             .unwrap();
-        rows
-            .into_iter()
-            .map(|row| {
-                match elem_type {
-                    FatType::Bool => MoveValue::Bool(row.get(0)),
-                    FatType::U8 => MoveValue::U8(row.get::<i64,_>(0) as u8),
-                    FatType::U64 => MoveValue::U64(row.get::<i64,_>(0) as u64),
-                    FatType::U128 => {
-                        let bytes: Vec<u8> = row.get(0);
-                        let v = u128::from_be_bytes(bytes.try_into().unwrap());
-                        MoveValue::U128(v)
-                    },
-                    FatType::Address => {
-                        let bytes: Vec<u8> = row.get(0);
-                        MoveValue::Address(AccountAddress::try_from(bytes).unwrap())
-                    },
-                    FatType::Vector(ref sub_type) => {
-                        match **sub_type {
-                            FatType::U8 => {
-                                let bytes: Vec<u8> = row.get(0);
-                                let v: Vec<MoveValue> = bytes
-                                    .into_iter()
-                                    .map(|b| MoveValue::U8(b)).collect();
-                                MoveValue::Vector(v)
-                            },
-                            _ => todo!(),
-                        }
-                    },
-                    FatType::Struct(_) => {
-                        todo!()
-                    },
-                    FatType::TyParam(_) => unreachable!(),
-                }
-            })
-            .collect()
+        let mut elements = vec![];
+        for row in rows {
+            let element = match elem_type {
+                FatType::Bool => MoveValue::Bool(row.get(0)),
+                FatType::U8 => MoveValue::U8(row.get::<i64,_>(0) as u8),
+                FatType::U64 => MoveValue::U64(row.get::<i64,_>(0) as u64),
+                FatType::U128 => {
+                    let bytes: Vec<u8> = row.get(0);
+                    let v = u128::from_be_bytes(bytes.try_into().unwrap());
+                    MoveValue::U128(v)
+                },
+                FatType::Address => {
+                    let bytes: Vec<u8> = row.get(0);
+                    MoveValue::Address(AccountAddress::try_from(bytes).unwrap())
+                },
+                FatType::Vector(ref sub_type) => {
+                    match **sub_type {
+                        FatType::U8 => {
+                            let bytes: Vec<u8> = row.get(0);
+                            let v: Vec<MoveValue> = bytes
+                                .into_iter()
+                                .map(|b| MoveValue::U8(b)).collect();
+                            MoveValue::Vector(v)
+                        },
+                        _ => todo!(),
+                    }
+                },
+                FatType::Struct(sty) => {
+                    let sub_tag = sty.struct_tag().unwrap();
+                    let sub_id = row.get(0);
+                    fetch_struct(&sub_tag, sub_id, resolver, db).await.unwrap()
+                },
+                FatType::TyParam(_) => unreachable!(),
+            };
+            elements.push(element);
+        }
+        elements
     })
 }

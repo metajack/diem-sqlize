@@ -23,7 +23,7 @@ use crate::{
     resolver::Resolver,
 };
 
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct AnnotatedMoveStruct {
     pub is_resource: bool,
     pub type_: StructTag,
@@ -34,7 +34,7 @@ pub struct AnnotatedMoveStruct {
 /// for debugging/client purpose right now and just for a better visualization of on chain data. In
 /// the long run, we would like to transform this struct to a Json value so that we can have a cross
 /// platform interpretation of the on chain data.
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum AnnotatedMoveValue {
     U8(u8),
     U64(u64),
@@ -77,7 +77,7 @@ impl MoveValueAnnotator {
         self.annotate_value(&move_value, &ty).await
     }
 
-    async fn annotate_struct(
+    pub async fn annotate_struct(
         &self,
         move_struct: &MoveStruct,
         ty: &FatStructType,

@@ -82,13 +82,13 @@ impl StateView for SqlState {
                         .bind(address.as_ref())
                         .fetch_optional(&mut db)
                         .await
-                        .unwrap();
+                        .unwrap_or(None);
                     match result {
                         None => Ok(None),
                         Some(row) => {
                             println!("FETCHING STRUCT: {:?}", struct_tag);
                             let resolver = Resolver::from_pool(self.pool.clone());
-                            let struct_ = db::fetch_struct(&struct_tag, row.get(0), &resolver, &mut db).await;
+                            let struct_ = db::fetch_struct(&struct_tag, row.get(0), &resolver, &mut db).await.unwrap();
                             println!("FETCHED STRUCT: {:?}", struct_);
                             let bytes = bcs::to_bytes(&struct_).unwrap();
                             Ok(Some(bytes))

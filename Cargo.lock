@@ -791,6 +791,7 @@ dependencies = [
  "diem-types",
  "diem-vm",
  "hex",
+ "itertools 0.10.0",
  "move-core-types",
  "serde",
  "sqlx",

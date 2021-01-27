@@ -8,6 +8,7 @@ edition = "2018"
 anyhow = "1.0"
 bcs = "0.1"
 hex = "0.4"
+itertools = "0.10"
 serde = "1.0"
 sqlx = { version = "0.4", features = ["runtime-tokio-native-tls", "sqlite", "macros"] }
 structopt = "0.3"
