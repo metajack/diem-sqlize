@@ -9,12 +9,14 @@ anyhow = "1.0"
 bcs = "0.1"
 hex = "0.4"
 itertools = "0.10"
+libflate = "1.0"
 serde = "1.0"
 sqlx = { version = "0.4", features = ["runtime-tokio-native-tls", "sqlite", "macros"] }
 structopt = "0.3"
 tokio = { version = "1.0", features = ["full"] }
 url = "2.2"
 
+diem-crypto = { version = "0.1.0", git = "https://github.com/diem/diem", rev = "453eae5c4a660c53ad34242f45296119485ecb5c" }
 diem-json-rpc-client = { version = "0.1.0", git = "https://github.com/diem/diem", rev = "453eae5c4a660c53ad34242f45296119485ecb5c" }
 diem-state-view = { version = "0.1.0", git = "https://github.com/diem/diem", rev = "453eae5c4a660c53ad34242f45296119485ecb5c" }
 diem-types = { version = "0.1.0", git = "https://github.com/diem/diem", rev = "453eae5c4a660c53ad34242f45296119485ecb5c" }
@@ -24,6 +26,7 @@ move-core-types = { version = "0.1.0", git = "https://github.com/diem/diem", rev
 vm = { version = "0.1.0", git = "https://github.com/diem/diem", rev = "453eae5c4a660c53ad34242f45296119485ecb5c" }
 
 [patch."http://github.com/diem/diem"]
+diem-crypto = { path = "../diem/crypto/crypto" }
 diem-json-rpc-client = { path = "../diem/client/json-rpc" }
 diem-state-view = { path = "../diem/storage/state-view" }
 diem-types = { path = "../diem/types" }

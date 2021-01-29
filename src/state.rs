@@ -48,7 +48,6 @@ impl SqlState {
 impl StateView for SqlState {
     fn get(&self, access_path: &AccessPath) -> Result<Option<Vec<u8>>> {
         let (address, path) = util::decode_access_path(access_path);
-        println!("StateView::get({})", access_path);
         let rt = runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
@@ -57,7 +56,7 @@ impl StateView for SqlState {
             let mut db = self.pool.acquire().await?;
             match path {
                 Path::Code(module_id) => {
-                    println!("module get({})", module_id);
+                    //println!("module get({})", module_id);
                     let select_sql = "SELECT data FROM __module WHERE address = ? AND name = ?";
                     let result = sqlx::query(select_sql)
                         .bind(module_id.address().as_ref())
@@ -71,13 +70,13 @@ impl StateView for SqlState {
                     }
                 },
                 Path::Resource(struct_tag) => {
-                    println!("resource get({}::{})", address, struct_tag);
+                    //println!("resource get({}::{})", address, struct_tag);
                     let sql_tag = db::struct_tag_to_sql(&struct_tag);
                     let select_sql = format!(
                         "SELECT id FROM __root__{} WHERE address = ?",
                         sql_tag,
                     );
-                    println!("QUERY: {}\nPARAM: {}", select_sql, hex::encode(address));
+                    //println!("QUERY: {}\nPARAM: {}", select_sql, hex::encode(address));
                     let result = sqlx::query(&select_sql)
                         .bind(address.as_ref())
                         .fetch_optional(&mut db)
@@ -86,10 +85,8 @@ impl StateView for SqlState {
                     match result {
                         None => Ok(None),
                         Some(row) => {
-                            println!("FETCHING STRUCT: {:?}", struct_tag);
                             let resolver = Resolver::from_pool(self.pool.clone());
                             let struct_ = db::fetch_struct(&struct_tag, row.get(0), &resolver, &mut db).await.unwrap();
-                            println!("FETCHED STRUCT: {:?}", struct_);
                             let bytes = bcs::to_bytes(&struct_).unwrap();
                             Ok(Some(bytes))
                         },
@@ -99,8 +96,8 @@ impl StateView for SqlState {
         })
     }
 
-    fn multi_get(&self, access_paths: &[AccessPath]) -> Result<Vec<Option<Vec<u8>>>> {
-        println!("get({:?})", access_paths);
+    fn multi_get(&self, _access_paths: &[AccessPath]) -> Result<Vec<Option<Vec<u8>>>> {
+        //println!("get({:?})", access_paths);
         Err(anyhow!("not implemented"))
     }
 

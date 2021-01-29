@@ -14,6 +14,8 @@ use sqlx::{
     sqlite::{Sqlite, SqlitePool},
 };
 use std::{
+    cell::RefCell,
+    collections::HashSet,
     convert::{TryFrom, TryInto},
     future::Future,
     pin::Pin,
@@ -25,6 +27,10 @@ use crate::{
     resolver::Resolver,
     util,
 };
+
+thread_local! {
+    static CREATED_CACHE: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+}
 
 pub struct DB {
     pool: SqlitePool,
@@ -64,13 +70,13 @@ impl DB {
         }
     }
 
-    async fn unpublish(&self, id: &ModuleId) {
-        println!("unpublishing {}", id);
+    async fn unpublish(&self, _id: &ModuleId) {
+        //println!("unpublishing {}", id);
         todo!();
     }
 
     async fn publish(&self, id: &ModuleId, data: &[u8]) {
-        println!("publishing {}", id);
+        //println!("publishing {}", id);
         let address = id.address();
         let name = id.name().as_str();
         let create_sql = format!(
@@ -86,14 +92,14 @@ impl DB {
             .unwrap();
     }
 
-    async fn delete(&self, address: &AccountAddress, tag: &StructTag) {
-        println!("deleting {}::{}", address, tag);
+    async fn delete(&self, _address: &AccountAddress, _tag: &StructTag) {
+        //println!("deleting {}::{}", address, tag);
         todo!();
     }
 
     async fn store(&self, address: &AccountAddress, tag: &StructTag, data: AnnotatedMoveStruct) {
-        println!("storing {}::{}", address, tag);
-        println!("{}", data);
+        //println!("storing {}::{}", address, tag);
+        //println!("{}", data);
         let mut db = self.pool.acquire().await.unwrap();
 
         // see if global object already exists
@@ -102,7 +108,7 @@ impl DB {
             "SELECT id FROM __root__{} WHERE address = ?",
             sql_tag,
         );
-        println!("QUERY: {}\nPARAM: {}", select_sql, address.short_str());
+        //println!("QUERY: {}\nPARAM: {}", select_sql, address.short_str());
         let result = sqlx::query(&select_sql)
             .bind(address.as_ref())
             .fetch_optional(&mut db)
@@ -138,9 +144,6 @@ pub fn generate_diff_sql<'a>(
     Box::pin(async move {
         assert_eq!(old_value.type_, value.type_, "struct types must match");
 
-        println!("generating diff sql");
-        println!("old value =\n{:?}", old_value);
-        println!("new value =\n{:?}", value);
         let changed_fields = old_value
             .value
             .iter()
@@ -156,8 +159,6 @@ pub fn generate_diff_sql<'a>(
         if changed_fields.is_empty() {
             return;
         }
-
-        println!("changed fields: {}",changed_fields.iter().map(|(s, _, _)| format!("{}", s)).collect::<Vec<_>>().join(", "));
 
         let sql_tag = struct_tag_to_sql(&value.type_);
         let mut updated = vec![];
@@ -196,7 +197,6 @@ pub fn generate_diff_sql<'a>(
                         field_name,
                         sql_tag,
                     );
-                    println!("fetching id for changed sub-struct: {}", select_sql);
                     let sub_id = sqlx::query(&select_sql)
                         .bind(id)
                         .fetch_one(&mut *db)
@@ -215,7 +215,7 @@ pub fn generate_diff_sql<'a>(
                 sql_tag,
                 updated.join(", "),
             );
-            println!("{}", update_sql);
+            //println!("{}", update_sql);
             sqlx::query(&update_sql)
                 .bind(id)
                 .execute(&mut *db)
@@ -231,21 +231,24 @@ pub async fn generate_sql(address: &AccountAddress, value: Option<&AnnotatedMove
         Some(struct_) => {
             let id = struct_to_sql(struct_, db).await;
 
-            // attach struct to global storage
-            let create_sql = format!(
-                "CREATE TABLE IF NOT EXISTS __root__{} (address BLOB UNIQUE NOT NULL, id INTEGER NOT NULL)",
-                struct_tag_to_sql(&struct_.type_),
-            );
-            println!("{}", create_sql);
-            sqlx::query(&create_sql).execute(&mut *db).await.unwrap();
+            let table_name = format!("__root__{}", struct_tag_to_sql(&struct_.type_));
+            if !hit_created_cache(&table_name) {
+                // attach struct to global storage
+                let create_sql = format!(
+                    "CREATE TABLE IF NOT EXISTS {} (address BLOB UNIQUE NOT NULL, id INTEGER NOT NULL)",
+                    table_name,
+                );
+                //println!("{}", create_sql);
+                sqlx::query(&create_sql).execute(&mut *db).await.unwrap();
+            }
 
             let insert_sql = format!(
-                "INSERT INTO __root__{} VALUES (x'{}', {})",
-                struct_tag_to_sql(&struct_.type_),
+                "INSERT INTO {} VALUES (x'{}', {})",
+                table_name,
                 hex::encode(address),
                 id,
             );
-            println!("{}", insert_sql);
+            //println!("{}", insert_sql);
             sqlx::query(&insert_sql).execute(&mut *db).await.unwrap();
         },
         None => {
@@ -327,24 +330,29 @@ fn struct_to_sql<'a>(struct_: &'a AnnotatedMoveStruct, db: &'a mut PoolConnectio
             }
         }
 
+        let table_name = struct_tag_to_sql(&struct_.type_);
         if !struct_.value.is_empty() {
-            let create_sql = format!("CREATE TABLE IF NOT EXISTS {} ({})",
-                                     struct_tag_to_sql(&struct_.type_),
-                                     fields.join(", "));
-            println!("{}", create_sql);
-            sqlx::query(&create_sql).execute(&mut *db).await.unwrap();
-            
+            if !hit_created_cache(&table_name) {
+                let create_sql = format!(
+                    "CREATE TABLE IF NOT EXISTS {} ({})",
+                    table_name,
+                    fields.join(", "),
+                );
+                //println!("{}", create_sql);
+                sqlx::query(&create_sql).execute(&mut *db).await.unwrap();
+            }            
+
             let insert_sql = if !field_names.is_empty() {
                 format!(
                     "INSERT INTO {} ({}) VALUES ({})",
-                    struct_tag_to_sql(&struct_.type_),
+                    table_name,
                     field_names.join(", "),
                     values.join(", "),
                 )
             } else {
-                format!("INSERT INTO {} DEFAULT VALUES", struct_tag_to_sql(&struct_.type_))
+                format!("INSERT INTO {} DEFAULT VALUES", table_name)
             };
-            println!("{}", insert_sql);
+            //println!("{}", insert_sql);
             let result = sqlx::query(&insert_sql).execute(&mut *db).await.unwrap();
             let id = result.last_insert_rowid();
 
@@ -368,13 +376,17 @@ fn struct_to_sql<'a>(struct_: &'a AnnotatedMoveStruct, db: &'a mut PoolConnectio
 
             id
         } else {
-            let create_sql = format!("CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY)",
-                                     struct_tag_to_sql(&struct_.type_));
-            println!("{}", create_sql);
-            sqlx::query(&create_sql).execute(&mut *db).await.unwrap();
-            
-            let insert_sql = format!("INSERT INTO {} DEFAULT VALUES;", struct_tag_to_sql(&struct_.type_));
-            println!("{}", insert_sql);
+            if !hit_created_cache(&table_name) {
+                let create_sql = format!(
+                    "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY)",
+                    table_name,
+                );
+                //println!("{}", create_sql);
+                sqlx::query(&create_sql).execute(&mut *db).await.unwrap();
+            }            
+
+            let insert_sql = format!("INSERT INTO {} DEFAULT VALUES;", table_name);
+            //println!("{}", insert_sql);
             let result = sqlx::query(&insert_sql).execute(&mut *db).await.unwrap();
 
             result.last_insert_rowid()
@@ -399,14 +411,16 @@ async fn vector_to_sql(name: String, pid: i64, ty: &TypeTag, v: &[AnnotatedMoveV
         _ => unreachable!(),
     };
 
-    let create_sql = format!(
-        "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL, {})",
-        name,
-        field,
-    );
-    println!("{}", create_sql);
-    sqlx::query(&create_sql).execute(&mut *db).await.unwrap();
-    
+    if !hit_created_cache(&name) {
+        let create_sql = format!(
+            "CREATE TABLE IF NOT EXISTS {} (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL, {})",
+            name,
+            field,
+        );
+        //println!("{}", create_sql);
+        sqlx::query(&create_sql).execute(&mut *db).await.unwrap();
+    }    
+
     // populate table
     for e in v {
         match e {
@@ -417,7 +431,7 @@ async fn vector_to_sql(name: String, pid: i64, ty: &TypeTag, v: &[AnnotatedMoveV
                     pid,
                     hex::encode(a),
                 );
-                println!("{}", insert_sql);
+                //println!("{}", insert_sql);
                 sqlx::query(&insert_sql).execute(&mut *db).await.unwrap();
             },
             AnnotatedMoveValue::Struct(s) => {
@@ -428,7 +442,7 @@ async fn vector_to_sql(name: String, pid: i64, ty: &TypeTag, v: &[AnnotatedMoveV
                     pid,
                     id,
                 );
-                println!("{}", insert_sql);
+                //println!("{}", insert_sql);
                 sqlx::query(&insert_sql).execute(&mut *db).await.unwrap();
             },
             AnnotatedMoveValue::Bytes(b) => {
@@ -438,7 +452,7 @@ async fn vector_to_sql(name: String, pid: i64, ty: &TypeTag, v: &[AnnotatedMoveV
                     pid,
                     hex::encode(b),
                 );
-                println!("{}", insert_sql);
+                //println!("{}", insert_sql);
                 sqlx::query(&insert_sql).execute(&mut *db).await.unwrap();
             },
 
@@ -505,8 +519,6 @@ pub fn fetch_struct<'a>(
     Box::pin(async move {
         // Find the fields to query for the struct
         let struct_ = resolver.resolve_struct(tag).await.unwrap();
-        println!("resolved struct: {:?}", struct_);
-
         let columns = struct_columns(&struct_);
         let columns = if columns.is_empty() {
             vec!["__id"]
@@ -519,7 +531,7 @@ pub fn fetch_struct<'a>(
             struct_tag_to_sql(tag),
             id,
         );
-        println!("{}", select_sql);
+        //println!("{}", select_sql);
         let row = sqlx::query(&select_sql)
             .fetch_optional(&mut *db)
             .await
@@ -532,7 +544,6 @@ pub fn fetch_struct<'a>(
         let mut fields = vec![];
         let mut column_index = 0;
         for (field_name, field_type) in struct_.fields {
-            println!("column_index = {}, field.name = {}, field.type = {:?}", column_index, field_name, field_type);
             match field_type {
                 // vectors (other than Vector<u8>) have no corresponding column in the struct's table
                 FatType::Vector(ref sub_type) => {
@@ -635,7 +646,7 @@ fn fetch_vector<'a>(
             table_name,
             id,
         );
-        println!("ELEMENTS QUERY: {}", select_sql);
+        //println!("ELEMENTS QUERY: {}", select_sql);
         let rows = sqlx::query(&select_sql)
             .fetch_all(&mut *db)
             .await
@@ -677,5 +688,15 @@ fn fetch_vector<'a>(
             elements.push(element);
         }
         elements
+    })
+}
+
+fn hit_created_cache(name: &String) -> bool {
+    CREATED_CACHE.with(|cache| {
+        let exists = cache.borrow().contains(name);
+        if !exists {
+            cache.borrow_mut().insert(name.clone());
+        }
+        exists
     })
 }
