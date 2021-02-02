@@ -182,8 +182,18 @@ pub fn generate_diff_sql<'a>(
                 AnnotatedMoveValue::Bytes(v) => {
                     updated.push(format!("{} = x'{}'", field_name, hex::encode(v)));
                 },
-                AnnotatedMoveValue::Vector(_, _) => {
-                    todo!();
+                AnnotatedMoveValue::Vector(ty, v) => {
+                    // delete old entries
+                    let name = vector_table_name(&value.type_, field_name);
+                    let delete_sql = format!(
+                        "DELETE FROM {} WHERE parent_id = {}",
+                        name,
+                        id,
+                    );
+                    sqlx::query(&delete_sql).execute(&mut *db).await.unwrap();
+
+                    // populate new entries
+                    vector_to_sql(name, id, &ty, &v, &mut *db).await;
                 },
                 AnnotatedMoveValue::Struct(v) => {
                     // this will generate no changes here, but will recursively update the struct
@@ -276,7 +286,7 @@ fn struct_to_sql<'a>(struct_: &'a AnnotatedMoveStruct, db: &'a mut PoolConnectio
                 AnnotatedMoveValue::U64(i) => {
                     field_names.push(format!("{}", ident));
                     fields.push(format!("{} INTEGER NOT NULL", ident));
-                    values.push(format!("{}", i));
+                    values.push(format!("{}", *i as i64));
                 },
                 AnnotatedMoveValue::U128(i) => {
                     field_names.push(format!("{}", ident));
