@@ -44,7 +44,7 @@ struct Options {
     #[structopt(long, parse(try_from_str = Url::parse))]
     pub endpoint: Url,
     #[structopt(long, parse(from_os_str), requires("backup-version"))]
-    pub backup_file: Option<PathBuf>,
+    pub backup_file: Option<Vec<PathBuf>>,
     #[structopt(long, requires("backup-file"))]
     pub backup_version: Option<u64>,
 }
@@ -99,13 +99,15 @@ async fn main() -> Result<()> {
         let annotator = MoveValueAnnotator::new(resolver);
 
         // process state snaphost from backup
-        let backup = Backup::from_file(&backup_file)?;
-        for account_state in backup {
-            let address = find_account_address(&account_state);
-            for (key, value) in account_state.iter() {
-                let access_path = AccessPath::new(address.clone(), key.clone());
-                let write_op = WriteOp::Value(value.clone());
-                db.execute_with_annotator(&access_path, &write_op, &annotator).await;
+        for file in backup_file {
+            let backup = Backup::from_file(&file)?;
+            for account_state in backup {
+                let address = find_account_address(&account_state);
+                for (key, value) in account_state.iter() {
+                    let access_path = AccessPath::new(address.clone(), key.clone());
+                    let write_op = WriteOp::Value(value.clone());
+                    db.execute_with_annotator(&access_path, &write_op, &annotator).await;
+                }
             }
         }
         backup_version + 1
